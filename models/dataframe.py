@@ -18,16 +18,24 @@ class DataFrame:
         return self._compressed
 
     @property
-    def _writable_size(self) -> bytes:
+    def decompressed(self) -> bytes:
+        return zlib.decompress(self.content)
+
+    @property
+    def compressed_size(self) -> bytes:
         return len(self.compressed).to_bytes(4, 'big')
 
     @property
-    def writable_data(self) -> bytes:
-        return self._writable_size + self.compressed
+    def compressed_bytes(self) -> bytes:
+        return self.compressed_size + self.compressed
 
     @property
-    def writable_uncompressed(self) -> bytes:
-        return len(self.content).to_bytes(4, 'big') + self.content
+    def uncompressed_size(self) -> bytes:
+        return len(self.content).to_bytes(4, 'big')
+
+    @property
+    def uncompressed_bytes(self) -> bytes:
+        return self.uncompressed_size + self.content
 
     @property
     def decoded(self):
@@ -38,7 +46,7 @@ class DataFrame:
     @property
     def dictionary(self):
         if not self._json:
-            self._json = json.loads(self.decoded)
+            self._json = json.loads(self.content)
         return self._json
 
 
@@ -53,5 +61,5 @@ def read_message(read_bytes: Callable) -> DataFrame:
 
 def message_from(data: Dict[str, Any]) -> DataFrame:
     content = json.dumps(data).encode('utf-8')
-    print(content)
+    # print(content)
     return DataFrame(content)

@@ -1,10 +1,10 @@
 import string
 
-from random import randint, choice
+from random import choice
 from threading import Lock
 from typing import Any, Callable
 from pathlib import Path
-from config import data_path, queue_prefix, queue_filename
+from config.config import data_path, queue_prefix, queue_filename, meta_filename
 
 
 def synchronized(lock: Lock = None, resolver: Callable = None) -> Any:
@@ -29,6 +29,9 @@ def queue_folder(queue_name: str) -> Path:
 
 def queue_file(folder: Path) -> Path:
     return folder.joinpath(queue_filename)
+
+def queue_meta_file(folder: Path) -> Path:
+    return folder.joinpath(meta_filename)
 
 
 def random_string(msg_size: int = 100) -> str:
