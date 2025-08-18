@@ -1,0 +1,32 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 9999,
+    "max_connections": 100,
+    "connection_timeout": 300,
+    "heartbeat_interval": 30
+  },
+  "storage": {
+    "data_dir": "./storage/data",
+    "snapshot_dir": "./storage/snapshots",
+    "snapshot_interval": 60,
+    "max_log_size": 104857600,
+    "sync_interval": 1
+  },
+  "topics": {
+    "default_partitions": 1,
+    "max_partitions": 16,
+    "retention_hours": 24,
+    "max_message_size": 1048576
+  },
+  "client": {
+    "max_retries": 3,
+    "retry_delay": 1,
+    "request_timeout": 30,
+    "auto_ack": true
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  }
+}

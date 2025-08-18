@@ -1,15 +1,54 @@
-.idea
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-.idea/*
+# Storage and logs
+storage/
+*.log
+*.idx
 
-*__pycache__*
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
 
-venv/*
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
-data/*
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
 
-test
-
-test/*
-
-*.go
+# Docker
+.dockerignore
