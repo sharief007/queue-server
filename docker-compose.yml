@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  broker1:
+    build: .
+    ports:
+      - "9999:9999"
+    environment:
+      - QB_SERVER_HOST=0.0.0.0
+      - QB_SERVER_PORT=9999
+      - QB_DATA_DIR=/data
+    volumes:
+      - ./storage/broker1:/data
+    networks:
+      - broker-network
+
+  broker2:
+    build: .
+    ports:
+      - "10000:9999"
+    environment:
+      - QB_SERVER_HOST=0.0.0.0
+      - QB_SERVER_PORT=9999
+      - QB_DATA_DIR=/data
+    volumes:
+      - ./storage/broker2:/data
+    networks:
+      - broker-network
+
+  broker3:
+    build: .
+    ports:
+      - "10001:9999"
+    environment:
+      - QB_SERVER_HOST=0.0.0.0
+      - QB_SERVER_PORT=9999
+      - QB_DATA_DIR=/data
+    volumes:
+      - ./storage/broker3:/data
+    networks:
+      - broker-network
+
+networks:
+  broker-network:
+    driver: bridge
