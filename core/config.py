@@ -29,6 +29,7 @@ class Config:
             'snapshot_interval': 60,    # seconds
             'max_log_size': 1024 * 1024 * 100,  # 100MB
             'sync_interval': 1,         # seconds
+            'memory_cache_size': 1000,  # number of recent messages to keep in memory per partition
         },
         
         # Topic settings
@@ -195,12 +196,6 @@ def get_config() -> Config:
     """Get global configuration instance"""
     global _config_instance
     if _config_instance is None:
-        config_file = os.getenv('QB_CONFIG_FILE', 'config/broker.json')
+        config_file = os.getenv('QB_CONFIG_FILE')  # None if not set
         _config_instance = Config(config_file)
-    return _config_instance
-
-def initialize_config(config_file: Optional[str] = None) -> Config:
-    """Initialize global configuration"""
-    global _config_instance
-    _config_instance = Config(config_file)
     return _config_instance

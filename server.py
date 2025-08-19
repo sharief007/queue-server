@@ -8,7 +8,7 @@ from socketserver import ThreadingTCPServer, BaseRequestHandler
 from typing import Optional
 
 from core.broker import MessageBroker
-from core.config import initialize_config
+from core.config import get_config
 
 
 # Setup logging
@@ -72,12 +72,12 @@ class BrokerRequestHandler(BaseRequestHandler):
 class BrokerServer(ThreadingTCPServer):
     """TCP Server for the message broker"""
     
-    allow_reuse_address = True
-    daemon_threads = True  # Allow server to exit even if threads are running
-    
     def __init__(self, server_address, RequestHandlerClass):
         self.broker = MessageBroker()  # Initialize broker before calling super()
         super().__init__(server_address, RequestHandlerClass)
+        # Set these after initialization to ensure they take effect
+        self.allow_reuse_address = True
+        self.daemon_threads = True  # Allow server to exit even if threads are running
     
     def server_activate(self):
         """Start the broker when server activates"""
@@ -118,7 +118,7 @@ def signal_handler(signum, frame):
 def main():
     """Main server entry point"""
     # Initialize configuration
-    config = initialize_config()
+    config = get_config()
     
     # Setup logging level from config
     log_level = getattr(logging, config.get('logging.level', 'INFO').upper())
