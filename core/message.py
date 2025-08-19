@@ -17,6 +17,9 @@ class MessageType(IntEnum):
     SUBSCRIBE = 5
     UNSUBSCRIBE = 6
     PUBLISH = 7
+    PULL_MESSAGES = 8
+    PULL_START = 9      # Start streaming pull
+    PULL_STOP = 10      # Stop streaming pull 
 
 
 class Message:
