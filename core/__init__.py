@@ -4,16 +4,16 @@ Core message broker components.
 
 from .message import Message, MessageType, MessageBuilder
 from .config import Config, get_config
-from .storage import StorageManager, TopicStorage, PartitionOffset
-from .topic import TopicManager, TopicInfo, Subscription
+from .topic_storage import TopicStorageManager, TopicLog, MessageOffset
+from .subscription import SubscriptionManager, Subscription, Subscriber
 from .protocol import ProtocolHandler, ClientConnection
 from .broker import MessageBroker
 
 __all__ = [
     'Message', 'MessageType', 'MessageBuilder',
     'Config', 'get_config',
-    'StorageManager', 'TopicStorage', 'PartitionOffset',
-    'TopicManager', 'TopicInfo', 'Subscription',
+    'TopicStorageManager', 'TopicLog', 'MessageOffset',
+    'SubscriptionManager', 'Subscription', 'Subscriber',
     'ProtocolHandler', 'ClientConnection',
     'MessageBroker'
 ]

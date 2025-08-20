@@ -1,5 +1,6 @@
 """
 Client library and CLI for the message broker.
+Refactored to work with the subscription-based messaging system.
 """
 import socket
 import threading
@@ -7,10 +8,11 @@ import time
 import logging
 import argparse
 import json
+import struct
 from typing import Optional, Callable, List, Dict, Any
 
 from core.message import Message, MessageType, MessageBuilder
-from core.config import Config
+from core.config import get_config
 
 
 logger = logging.getLogger(__name__)
@@ -33,10 +35,17 @@ class BrokerClient:
         self._response_handlers: Dict[int, threading.Event] = {}
         self._responses: Dict[int, Message] = {}
         self._subscription_handlers: Dict[str, Callable[[Message], None]] = {}
+        self._active_subscriptions: Dict[str, str] = {}  # subscription_id -> topic
         
         # Background threads
         self._receive_thread: Optional[threading.Thread] = None
+        self._heartbeat_thread: Optional[threading.Thread] = None
         self._running = False
+        
+        # Configuration
+        self.config = get_config()
+        self.heartbeat_interval = self.config.get('client.heartbeat_interval', 30)
+        self.request_timeout = self.config.get('client.request_timeout', 30)
     
     def connect(self) -> None:
         """Connect to the broker"""
@@ -57,6 +66,14 @@ class BrokerClient:
                 name=f"ClientReceive-{self.client_id}"
             )
             self._receive_thread.start()
+            
+            # Start heartbeat thread
+            self._heartbeat_thread = threading.Thread(
+                target=self._heartbeat_worker,
+                daemon=True,
+                name=f"ClientHeartbeat-{self.client_id}"
+            )
+            self._heartbeat_thread.start()
             
             logger.info(f"Connected to broker at {self.host}:{self.port}")
             
@@ -79,8 +96,10 @@ class BrokerClient:
         except Exception:
             pass
         
-        if self._receive_thread and self._receive_thread.is_alive():
-            self._receive_thread.join(timeout=5)
+        # Wait for threads to finish
+        for thread in [self._receive_thread, self._heartbeat_thread]:
+            if thread and thread.is_alive():
+                thread.join(timeout=5)
         
         logger.info("Disconnected from broker")
     
@@ -90,6 +109,28 @@ class BrokerClient:
                   .property('topic', topic)
                   .property('partitions', str(partitions))
                   .property('retention_hours', str(retention_hours))
+                  .sequence_number(self._get_next_sequence())
+                  .build())
+        
+        response = self._send_and_wait(message)
+        return response and response.properties.get('status') == 'success'
+    
+    def create_subscription(self, subscription_id: str, topic: str, start_offset: int = 0) -> bool:
+        """Create a subscription for a topic"""
+        message = (MessageBuilder(MessageType.CREATE_SUBSCRIPTION)
+                  .property('subscription_id', subscription_id)
+                  .property('topic', topic)
+                  .property('start_offset', str(start_offset))
+                  .sequence_number(self._get_next_sequence())
+                  .build())
+        
+        response = self._send_and_wait(message)
+        return response and response.properties.get('status') == 'success'
+    
+    def delete_subscription(self, subscription_id: str) -> bool:
+        """Delete a subscription"""
+        message = (MessageBuilder(MessageType.DELETE_SUBSCRIPTION)
+                  .property('subscription_id', subscription_id)
                   .sequence_number(self._get_next_sequence())
                   .build())
         
@@ -118,54 +159,104 @@ class BrokerClient:
         """Publish a text message to a topic"""
         return self.publish(topic, text.encode('utf-8'), partition, **properties)
     
+    def subscribe_to_subscription(self, 
+                                 subscription_id: str,
+                                 handler: Optional[Callable[[Message], None]] = None) -> bool:
+        """Subscribe to an existing subscription (join as a consumer)"""
+        message = (MessageBuilder(MessageType.SUBSCRIBE)
+                  .property('subscription_id', subscription_id)
+                  .property('subscriber_id', self.client_id)
+                  .sequence_number(self._get_next_sequence())
+                  .build())
+        
+        response = self._send_and_wait(message)
+        if response and response.properties.get('status') == 'success':
+            # Track the subscription
+            topic = response.properties.get('topic', 'unknown')
+            self._active_subscriptions[subscription_id] = topic
+            
+            # Register handler
+            if handler:
+                self._subscription_handlers[subscription_id] = handler
+            
+            logger.info(f"Subscribed to subscription {subscription_id} for topic {topic}")
+            return True
+        
+        return False
+    
+    def unsubscribe_from_subscription(self, subscription_id: str) -> bool:
+        """Unsubscribe from a subscription"""
+        message = (MessageBuilder(MessageType.UNSUBSCRIBE)
+                  .property('subscription_id', subscription_id)
+                  .property('subscriber_id', self.client_id)
+                  .sequence_number(self._get_next_sequence())
+                  .build())
+        
+        response = self._send_and_wait(message)
+        if response and response.properties.get('status') == 'success':
+            # Remove tracking
+            if subscription_id in self._active_subscriptions:
+                del self._active_subscriptions[subscription_id]
+            if subscription_id in self._subscription_handlers:
+                del self._subscription_handlers[subscription_id]
+            
+            logger.info(f"Unsubscribed from subscription {subscription_id}")
+            return True
+        
+        return False
+    
+    # Legacy methods for backward compatibility
     def subscribe(self, 
                  topic: str, 
                  partition: int = 0,
                  offset: int = 0,
                  auto_ack: bool = True,
                  handler: Optional[Callable[[Message], None]] = None) -> bool:
-        """Subscribe to a topic partition"""
-        message = (MessageBuilder(MessageType.SUBSCRIBE)
-                  .property('topic', topic)
-                  .property('client_id', self.client_id)
-                  .property('partition', str(partition))
-                  .property('offset', str(offset))
-                  .property('auto_ack', str(auto_ack).lower())
-                  .sequence_number(self._get_next_sequence())
-                  .build())
+        """
+        Legacy subscribe method - creates a subscription and joins it.
+        For new code, use create_subscription() + subscribe_to_subscription().
+        """
+        # Create a unique subscription ID
+        subscription_id = f"{self.client_id}_{topic}_{partition}_{int(time.time())}"
         
-        response = self._send_and_wait(message)
-        if response and response.properties.get('status') == 'success':
-            # Register handler for this topic
-            if handler:
-                self._subscription_handlers[f"{topic}:{partition}"] = handler
-            return True
+        # Create the subscription
+        if not self.create_subscription(subscription_id, topic, offset):
+            return False
         
-        return False
+        # Subscribe to it
+        return self.subscribe_to_subscription(subscription_id, handler)
     
     def unsubscribe(self, topic: str, partition: int = 0) -> bool:
-        """Unsubscribe from a topic partition"""
-        message = (MessageBuilder(MessageType.UNSUBSCRIBE)
-                  .property('topic', topic)
-                  .property('client_id', self.client_id)
-                  .property('partition', str(partition))
-                  .sequence_number(self._get_next_sequence())
-                  .build())
-        
-        response = self._send_and_wait(message)
-        if response and response.properties.get('status') == 'success':
-            # Remove handler
-            key = f"{topic}:{partition}"
-            if key in self._subscription_handlers:
-                del self._subscription_handlers[key]
-            return True
+        """
+        Legacy unsubscribe method.
+        Note: This only unsubscribes from subscriptions created via subscribe().
+        """
+        # Find matching subscription
+        for subscription_id, sub_topic in self._active_subscriptions.items():
+            if sub_topic == topic and subscription_id.startswith(f"{self.client_id}_{topic}_{partition}"):
+                return self.unsubscribe_from_subscription(subscription_id)
         
         return False
     
-    def _send_and_wait(self, message: Message, timeout: float = 30.0) -> Optional[Message]:
+    # Convenience methods
+    def create_and_subscribe(self, 
+                           subscription_id: str, 
+                           topic: str, 
+                           start_offset: int = 0,
+                           handler: Optional[Callable[[Message], None]] = None) -> bool:
+        """Create a subscription and immediately subscribe to it"""
+        if not self.create_subscription(subscription_id, topic, start_offset):
+            return False
+        
+        return self.subscribe_to_subscription(subscription_id, handler)
+    
+    def _send_and_wait(self, message: Message, timeout: Optional[float] = None) -> Optional[Message]:
         """Send a message and wait for response"""
         if not self._connected:
             raise RuntimeError("Not connected to broker")
+        
+        if timeout is None:
+            timeout = self.request_timeout
         
         seq_num = message.sequence_number
         
@@ -225,7 +316,6 @@ class BrokerClient:
             if not header_data:
                 return None
             
-            import struct
             total_length = struct.unpack('>I', header_data)[0]
             
             # Read rest of message
@@ -269,19 +359,41 @@ class BrokerClient:
             self._response_handlers[seq_num].set()
             return
         
+        # Handle heartbeat responses
+        if message.message_type == MessageType.HEARTBEAT:
+            logger.debug("Received heartbeat response")
+            return
+        
         # Check if it's a subscription message
         if message.message_type == MessageType.DATA:
+            subscription_id = message.properties.get('subscription_id')
             topic = message.properties.get('topic')
-            partition = message.properties.get('partition', '0')
             
-            if topic:
-                key = f"{topic}:{partition}"
-                handler = self._subscription_handlers.get(key)
-                if handler:
-                    try:
-                        handler(message)
-                    except Exception as e:
-                        logger.error(f"Subscription handler error: {e}")
+            if subscription_id and subscription_id in self._subscription_handlers:
+                handler = self._subscription_handlers[subscription_id]
+                try:
+                    handler(message)
+                except Exception as e:
+                    logger.error(f"Subscription handler error for {subscription_id}: {e}")
+            else:
+                logger.debug(f"Received message for unknown subscription {subscription_id}")
+    
+    def _heartbeat_worker(self) -> None:
+        """Background worker for sending heartbeats"""
+        while self._running and self._connected:
+            try:
+                time.sleep(self.heartbeat_interval)
+                
+                if self._connected and self._running:
+                    heartbeat = MessageBuilder(MessageType.HEARTBEAT).build()
+                    self._send_message(heartbeat)
+                    logger.debug("Sent heartbeat to broker")
+                    
+            except Exception as e:
+                if self._running:
+                    logger.error(f"Heartbeat worker error: {e}")
+                    self._connected = False
+                break
     
     def _get_next_sequence(self) -> int:
         """Get next sequence number"""
@@ -300,16 +412,16 @@ class BrokerClient:
 def print_message(message: Message) -> None:
     """Print a received message"""
     topic = message.properties.get('topic', 'unknown')
-    partition = message.properties.get('partition', '0')
+    subscription_id = message.properties.get('subscription_id', 'unknown')
     offset = message.sequence_number
     
     body = message.body.decode('utf-8', errors='replace')
     
-    print(f"[{topic}:{partition}@{offset}] {body}")
+    print(f"[{topic}@{offset}] (sub: {subscription_id}) {body}")
     
     # Print properties if any
     props = {k: v for k, v in message.properties.items() 
-            if k not in ['topic', 'partition', 'created_at', 'version']}
+            if k not in ['topic', 'subscription_id', 'created_at', 'version']}
     if props:
         print(f"  Properties: {props}")
 
@@ -329,6 +441,16 @@ def cli_main():
     create_parser.add_argument('--partitions', type=int, default=1, help='Number of partitions')
     create_parser.add_argument('--retention', type=int, default=24, help='Retention hours')
     
+    # Create subscription command
+    sub_create_parser = subparsers.add_parser('create-subscription', help='Create a subscription')
+    sub_create_parser.add_argument('subscription_id', help='Subscription ID')
+    sub_create_parser.add_argument('topic', help='Topic name')
+    sub_create_parser.add_argument('--offset', type=int, default=0, help='Start offset')
+    
+    # Delete subscription command
+    sub_delete_parser = subparsers.add_parser('delete-subscription', help='Delete a subscription')
+    sub_delete_parser.add_argument('subscription_id', help='Subscription ID')
+    
     # Publish command
     pub_parser = subparsers.add_parser('publish', help='Publish a message')
     pub_parser.add_argument('topic', help='Topic name')
@@ -336,12 +458,17 @@ def cli_main():
     pub_parser.add_argument('--partition', type=int, help='Partition number')
     pub_parser.add_argument('--properties', help='Message properties (JSON)')
     
-    # Subscribe command
-    sub_parser = subparsers.add_parser('subscribe', help='Subscribe to a topic')
+    # Subscribe command (legacy - creates and subscribes to a subscription)
+    sub_parser = subparsers.add_parser('subscribe', help='Subscribe to a topic (creates a subscription)')
     sub_parser.add_argument('topic', help='Topic name')
     sub_parser.add_argument('--partition', type=int, default=0, help='Partition number')
     sub_parser.add_argument('--offset', type=int, default=0, help='Start offset')
     sub_parser.add_argument('--count', type=int, help='Max messages to receive')
+    
+    # Join subscription command
+    join_parser = subparsers.add_parser('join-subscription', help='Join an existing subscription')
+    join_parser.add_argument('subscription_id', help='Subscription ID')
+    join_parser.add_argument('--count', type=int, help='Max messages to receive')
     
     args = parser.parse_args()
     
@@ -361,6 +488,20 @@ def cli_main():
                     print(f"Created topic '{args.topic}' with {args.partitions} partitions")
                 else:
                     print(f"Failed to create topic '{args.topic}'")
+            
+            elif args.command == 'create-subscription':
+                success = client.create_subscription(args.subscription_id, args.topic, args.offset)
+                if success:
+                    print(f"Created subscription '{args.subscription_id}' for topic '{args.topic}' starting at offset {args.offset}")
+                else:
+                    print(f"Failed to create subscription '{args.subscription_id}'")
+            
+            elif args.command == 'delete-subscription':
+                success = client.delete_subscription(args.subscription_id)
+                if success:
+                    print(f"Deleted subscription '{args.subscription_id}'")
+                else:
+                    print(f"Failed to delete subscription '{args.subscription_id}'")
             
             elif args.command == 'publish':
                 properties = {}
@@ -398,6 +539,33 @@ def cli_main():
                         print("\nStopping...")
                 else:
                     print(f"Failed to subscribe to topic '{args.topic}'")
+            
+            elif args.command == 'join-subscription':
+                print(f"Joining subscription '{args.subscription_id}'")
+                print("Press Ctrl+C to stop...")
+                
+                message_count = 0
+                
+                def handle_message(message: Message):
+                    nonlocal message_count
+                    print_message(message)
+                    message_count += 1
+                    
+                    if args.count and message_count >= args.count:
+                        return
+                
+                success = client.subscribe_to_subscription(args.subscription_id, handle_message)
+                if success:
+                    try:
+                        while True:
+                            if args.count and message_count >= args.count:
+                                break
+                            time.sleep(0.1)
+                    except KeyboardInterrupt:
+                        print("\nStopping...")
+                        client.unsubscribe_from_subscription(args.subscription_id)
+                else:
+                    print(f"Failed to join subscription '{args.subscription_id}'")
     
     except Exception as e:
         print(f"Error: {e}")
