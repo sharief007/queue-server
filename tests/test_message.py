@@ -236,12 +236,11 @@ class TestMessageType(unittest.TestCase):
             "ACK": 2,
             "HEARTBEAT": 3,
             "CREATE_TOPIC": 4,
-            "SUBSCRIBE": 5,
-            "UNSUBSCRIBE": 6,
-            "PUBLISH": 7,
-            "PULL_MESSAGES": 8,
-            "PULL_START": 9,
-            "PULL_STOP": 10,
+            "CREATE_SUBSCRIPTION": 5,
+            "DELETE_SUBSCRIPTION": 6,
+            "SUBSCRIBE": 7,
+            "UNSUBSCRIBE": 8,
+            "PUBLISH": 9,
         }
 
         for name, value in expected_types.items():
@@ -250,7 +249,7 @@ class TestMessageType(unittest.TestCase):
 
     def test_message_type_from_int(self):
         """Test creating MessageType from integer"""
-        for i in range(1, 11):
+        for i in range(1, 10):  # MessageType values go from 1 to 9
             msg_type = MessageType(i)
             self.assertEqual(msg_type.value, i)
 
