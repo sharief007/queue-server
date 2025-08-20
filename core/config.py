@@ -30,6 +30,7 @@ class Config:
             'max_log_size': 1024 * 1024 * 100,  # 100MB
             'sync_interval': 1,         # seconds
             'memory_cache_size': 1000,  # number of recent messages to keep in memory per partition
+            'fsync_on_write': True,     # Force fsync() for guaranteed persistence
         },
         
         # Topic settings

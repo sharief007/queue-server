@@ -14,12 +14,11 @@ class MessageType(IntEnum):
     ACK = 2
     HEARTBEAT = 3
     CREATE_TOPIC = 4
-    SUBSCRIBE = 5
-    UNSUBSCRIBE = 6
-    PUBLISH = 7
-    PULL_MESSAGES = 8
-    PULL_START = 9      # Start streaming pull
-    PULL_STOP = 10      # Stop streaming pull 
+    CREATE_SUBSCRIPTION = 5
+    DELETE_SUBSCRIPTION = 6
+    SUBSCRIBE = 7
+    UNSUBSCRIBE = 8
+    PUBLISH = 9 
 
 
 class Message:

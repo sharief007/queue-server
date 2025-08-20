@@ -212,8 +212,17 @@ class ProtocolHandler:
     def add_connection(self, client_socket: socket.socket, address: tuple) -> ClientConnection:
         """Add a new client connection"""
         with self._lock:
-            connection_id = f"conn_{self._connection_counter}"
-            self._connection_counter += 1
+            # Create connection ID based on address and timestamp for uniqueness
+            host, port = address
+            timestamp = int(time.time() * 1000) % 100000  # Last 5 digits of timestamp
+            connection_id = f"{host}:{port}_{timestamp}"
+            
+            # Ensure uniqueness by adding counter if needed
+            base_id = connection_id
+            counter = 1
+            while connection_id in self._connections:
+                connection_id = f"{base_id}_{counter}"
+                counter += 1
             
             connection = ClientConnection(client_socket, address, connection_id)
             self._connections[connection_id] = connection

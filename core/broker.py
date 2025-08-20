@@ -1,20 +1,34 @@
 """
 Main message broker implementation.
-Coordinates between storage, topics, and protocol layers.
+Coordinates Publishers, Subscribers, and Subscriptions.
 """
-import logging
 import threading
 import time
+import logging
 from typing import Dict, List, Optional, Any
 
-from .storage import StorageManager
-from .topic import TopicManager, TopicInfo, Subscription
+from .topic_storage import TopicStorageManager
+from .subscription import SubscriptionManager, Subscription
 from .protocol import ProtocolHandler, ClientConnection
 from .message import Message, MessageType, MessageBuilder
 from .config import get_config
 
 
 logger = logging.getLogger(__name__)
+
+
+class Publisher:
+    """Represents a publisher client"""
+    
+    def __init__(self, publisher_id: str, connection: ClientConnection):
+        self.publisher_id = publisher_id
+        self.connection = connection
+        self.created_at = time.time()
+        self.last_activity = time.time()
+    
+    def update_activity(self):
+        """Update last activity timestamp"""
+        self.last_activity = time.time()
 
 
 class MessageBroker:
@@ -24,14 +38,16 @@ class MessageBroker:
         self.config = get_config()
         
         # Initialize components
-        self.storage = StorageManager()
-        self.topic_manager = TopicManager(self.storage)
+        self.storage = TopicStorageManager()
+        self.subscription_manager = SubscriptionManager()
         self.protocol_handler = ProtocolHandler()
         
         self._running = False
         self._lock = threading.RLock()
         
-        # Track client info for cleanup
+        # Track publishers and connections
+        self._publishers: Dict[str, Publisher] = {}  # publisher_id -> Publisher
+        self._connection_to_publisher: Dict[str, str] = {}  # connection_id -> publisher_id
         self._client_info: Dict[str, Dict[str, Any]] = {}  # connection_id -> client_info
         
         # Register protocol message handlers
@@ -46,7 +62,7 @@ class MessageBroker:
             logger.info("Starting message broker...")
             
             # Start components
-            self.storage.start()
+            self.subscription_manager.start()
             self.protocol_handler.start()
             
             self._running = True
@@ -65,7 +81,8 @@ class MessageBroker:
             
             # Stop components
             self.protocol_handler.stop()
-            self.storage.stop()
+            self.subscription_manager.stop()
+            self.storage.close_all()
             
             logger.info("Message broker stopped")
     
@@ -77,26 +94,27 @@ class MessageBroker:
         self._client_info[connection.connection_id] = {
             'address': address,
             'connected_at': time.time(),
-            'client_id': None,  # Will be set during authentication/registration
+            'client_type': None,  # 'publisher' or 'subscriber'
+            'client_id': None,
         }
         
         return connection
     
     def remove_client_connection(self, connection_id: str) -> None:
-        """Remove a client connection and cleanup subscriptions"""
-        # Get client_id before removing connection
+        """Remove a client connection and cleanup"""
+        # Get client info before removing connection
         client_info = self._client_info.get(connection_id, {})
+        client_type = client_info.get('client_type')
         client_id = client_info.get('client_id')
         
         # Remove from protocol handler
         self.protocol_handler.remove_connection(connection_id)
         
-        # Cleanup subscriptions if client was registered
-        if client_id:
-            try:
-                self.topic_manager.unsubscribe_client(client_id)
-            except Exception as e:
-                logger.warning(f"Error cleaning up subscriptions for {client_id}: {e}")
+        # Cleanup based on client type
+        if client_type == 'publisher' and client_id:
+            self._remove_publisher(client_id)
+        elif client_type == 'subscriber':
+            self.subscription_manager.remove_subscriber_by_connection(connection_id)
         
         # Remove client info
         if connection_id in self._client_info:
@@ -109,6 +127,8 @@ class MessageBroker:
         handlers = {
             MessageType.CREATE_TOPIC: self._handle_create_topic,
             MessageType.PUBLISH: self._handle_publish,
+            MessageType.CREATE_SUBSCRIPTION: self._handle_create_subscription,
+            MessageType.DELETE_SUBSCRIPTION: self._handle_delete_subscription,
             MessageType.SUBSCRIBE: self._handle_subscribe,
             MessageType.UNSUBSCRIBE: self._handle_unsubscribe,
             MessageType.HEARTBEAT: self._handle_heartbeat,
@@ -124,21 +144,13 @@ class MessageBroker:
             if not topic_name:
                 return self._create_error_response("Missing 'topic' property", message.sequence_number)
             
-            partition_count = int(message.properties.get('partitions', self.config.get('topics.default_partitions')))
-            retention_hours = int(message.properties.get('retention_hours', self.config.get('topics.retention_hours')))
-            
             # Create topic
-            topic_info = self.topic_manager.create_topic(
-                name=topic_name,
-                partition_count=partition_count,
-                retention_hours=retention_hours
-            )
+            self.storage.create_topic(topic_name)
             
             # Return success response
             return (MessageBuilder(MessageType.ACK)
                    .property('status', 'success')
                    .property('topic', topic_name)
-                   .property('partitions', str(partition_count))
                    .sequence_number(message.sequence_number)
                    .build())
         
@@ -150,26 +162,42 @@ class MessageBroker:
         """Handle message publish request"""
         try:
             topic_name = message.properties.get('topic')
+            publisher_id = message.properties.get('publisher_id')
+            
             if not topic_name:
                 return self._create_error_response("Missing 'topic' property", message.sequence_number)
             
-            # Get partition if specified
-            partition = None
-            if 'partition' in message.properties:
-                partition = int(message.properties['partition'])
+            if not publisher_id:
+                return self._create_error_response("Missing 'publisher_id' property", message.sequence_number)
             
-            # Create data message from the body
-            data_message = MessageBuilder(MessageType.DATA).body(message.body).properties(message.properties).build()
+            # Register publisher if not already registered
+            if publisher_id not in self._publishers:
+                self._register_publisher(publisher_id, connection)
             
-            # Publish to topic
-            partition_offset = self.topic_manager.publish_message(topic_name, data_message, partition)
+            # Update publisher activity
+            self._publishers[publisher_id].update_activity()
+            
+            # Create data message from the request
+            data_message = MessageBuilder(MessageType.DATA)\
+                .body(message.body)\
+                .properties(message.properties)\
+                .build()
+            
+            # Store message to disk
+            message_offset = self.storage.append_message(topic_name, data_message)
+            
+            # Deliver to all subscriptions for this topic
+            topic_log = self.storage.get_topic(topic_name)
+            delivered_count = self.subscription_manager.deliver_message_to_topic(
+                topic_name, data_message, topic_log
+            )
             
             # Return success response
             return (MessageBuilder(MessageType.ACK)
                    .property('status', 'success')
                    .property('topic', topic_name)
-                   .property('partition', str(partition_offset.partition))
-                   .property('offset', str(partition_offset.offset))
+                   .property('offset', str(message_offset.offset))
+                   .property('delivered_to', str(delivered_count))
                    .sequence_number(message.sequence_number)
                    .build())
         
@@ -177,38 +205,82 @@ class MessageBroker:
             logger.error(f"Publish error: {e}")
             return self._create_error_response(str(e), message.sequence_number)
     
-    def _handle_subscribe(self, connection: ClientConnection, message: Message) -> Optional[Message]:
-        """Handle subscription request"""
+    def _handle_create_subscription(self, connection: ClientConnection, message: Message) -> Optional[Message]:
+        """Handle subscription creation request"""
         try:
+            subscription_id = message.properties.get('subscription_id')
             topic_name = message.properties.get('topic')
-            client_id = message.properties.get('client_id')
+            start_offset = int(message.properties.get('start_offset', 0))
             
-            if not topic_name or not client_id:
-                return self._create_error_response("Missing 'topic' or 'client_id' property", message.sequence_number)
+            if not subscription_id:
+                return self._create_error_response("Missing 'subscription_id' property", message.sequence_number)
             
-            # Update client info
-            self._client_info[connection.connection_id]['client_id'] = client_id
-            
-            partition = int(message.properties.get('partition', 0))
-            start_offset = int(message.properties.get('offset', 0))
-            auto_ack = message.properties.get('auto_ack', 'true').lower() == 'true'
+            if not topic_name:
+                return self._create_error_response("Missing 'topic' property", message.sequence_number)
             
             # Create subscription
-            subscription = self.topic_manager.subscribe(
-                topic=topic_name,
-                client_id=client_id,
-                partition=partition,
-                start_offset=start_offset,
-                auto_ack=auto_ack,
-                callback=lambda msg: self._send_message_to_client(connection, msg)
+            subscription = self.subscription_manager.create_subscription(
+                subscription_id, topic_name, start_offset
             )
             
-            # Return success response
             return (MessageBuilder(MessageType.ACK)
                    .property('status', 'success')
+                   .property('subscription_id', subscription_id)
                    .property('topic', topic_name)
-                   .property('partition', str(partition))
-                   .property('client_id', client_id)
+                   .property('start_offset', str(start_offset))
+                   .sequence_number(message.sequence_number)
+                   .build())
+        
+        except Exception as e:
+            logger.error(f"Create subscription error: {e}")
+            return self._create_error_response(str(e), message.sequence_number)
+    
+    def _handle_delete_subscription(self, connection: ClientConnection, message: Message) -> Optional[Message]:
+        """Handle subscription deletion request"""
+        try:
+            subscription_id = message.properties.get('subscription_id')
+            
+            if not subscription_id:
+                return self._create_error_response("Missing 'subscription_id' property", message.sequence_number)
+            
+            # Delete subscription
+            self.subscription_manager.delete_subscription(subscription_id)
+            
+            return (MessageBuilder(MessageType.ACK)
+                   .property('status', 'success')
+                   .property('subscription_id', subscription_id)
+                   .sequence_number(message.sequence_number)
+                   .build())
+        
+        except Exception as e:
+            logger.error(f"Delete subscription error: {e}")
+            return self._create_error_response(str(e), message.sequence_number)
+    
+    def _handle_subscribe(self, connection: ClientConnection, message: Message) -> Optional[Message]:
+        """Handle subscriber join request"""
+        try:
+            subscription_id = message.properties.get('subscription_id')
+            subscriber_id = message.properties.get('subscriber_id')
+            
+            if not subscription_id:
+                return self._create_error_response("Missing 'subscription_id' property", message.sequence_number)
+            
+            if not subscriber_id:
+                return self._create_error_response("Missing 'subscriber_id' property", message.sequence_number)
+            
+            # Add subscriber to subscription
+            self.subscription_manager.add_subscriber(
+                subscription_id, subscriber_id, connection.connection_id, connection.socket
+            )
+            
+            # Update client info
+            self._client_info[connection.connection_id]['client_type'] = 'subscriber'
+            self._client_info[connection.connection_id]['client_id'] = subscriber_id
+            
+            return (MessageBuilder(MessageType.ACK)
+                   .property('status', 'success')
+                   .property('subscription_id', subscription_id)
+                   .property('subscriber_id', subscriber_id)
                    .sequence_number(message.sequence_number)
                    .build())
         
@@ -217,25 +289,19 @@ class MessageBroker:
             return self._create_error_response(str(e), message.sequence_number)
     
     def _handle_unsubscribe(self, connection: ClientConnection, message: Message) -> Optional[Message]:
-        """Handle unsubscribe request"""
+        """Handle subscriber leave request"""
         try:
-            topic_name = message.properties.get('topic')
-            client_id = message.properties.get('client_id')
+            subscriber_id = message.properties.get('subscriber_id')
             
-            if not topic_name or not client_id:
-                return self._create_error_response("Missing 'topic' or 'client_id' property", message.sequence_number)
+            if not subscriber_id:
+                return self._create_error_response("Missing 'subscriber_id' property", message.sequence_number)
             
-            partition = int(message.properties.get('partition', 0))
+            # Remove subscriber
+            self.subscription_manager.remove_subscriber(subscriber_id)
             
-            # Unsubscribe
-            self.topic_manager.unsubscribe(topic_name, client_id, partition)
-            
-            # Return success response
             return (MessageBuilder(MessageType.ACK)
                    .property('status', 'success')
-                   .property('topic', topic_name)
-                   .property('partition', str(partition))
-                   .property('client_id', client_id)
+                   .property('subscriber_id', subscriber_id)
                    .sequence_number(message.sequence_number)
                    .build())
         
@@ -245,15 +311,36 @@ class MessageBroker:
     
     def _handle_heartbeat(self, connection: ClientConnection, message: Message) -> Optional[Message]:
         """Handle heartbeat message"""
-        # Just return a heartbeat response
+        # Update heartbeat for subscriber if applicable
+        client_info = self._client_info.get(connection.connection_id, {})
+        if client_info.get('client_type') == 'subscriber':
+            subscriber_id = client_info.get('client_id')
+            if subscriber_id:
+                self.subscription_manager.heartbeat_subscriber(subscriber_id)
+        
+        # Return heartbeat response
         return MessageBuilder(MessageType.HEARTBEAT).sequence_number(message.sequence_number).build()
     
-    def _send_message_to_client(self, connection: ClientConnection, message: Message) -> None:
-        """Send a message to a client (used by subscription callbacks)"""
-        try:
-            connection.send_message(message)
-        except Exception as e:
-            logger.warning(f"Failed to send message to client {connection.connection_id}: {e}")
+    def _register_publisher(self, publisher_id: str, connection: ClientConnection):
+        """Register a new publisher"""
+        publisher = Publisher(publisher_id, connection)
+        self._publishers[publisher_id] = publisher
+        self._connection_to_publisher[connection.connection_id] = publisher_id
+        
+        # Update client info
+        self._client_info[connection.connection_id]['client_type'] = 'publisher'
+        self._client_info[connection.connection_id]['client_id'] = publisher_id
+        
+        logger.info(f"Registered publisher {publisher_id}")
+    
+    def _remove_publisher(self, publisher_id: str):
+        """Remove a publisher"""
+        if publisher_id in self._publishers:
+            publisher = self._publishers[publisher_id]
+            if publisher.connection.connection_id in self._connection_to_publisher:
+                del self._connection_to_publisher[publisher.connection.connection_id]
+            del self._publishers[publisher_id]
+            logger.info(f"Removed publisher {publisher_id}")
     
     def _create_error_response(self, error_message: str, sequence_number: int = 0) -> Message:
         """Create an error response message"""
@@ -265,44 +352,30 @@ class MessageBroker:
     
     # Management APIs
     
-    def create_topic(self, name: str, partition_count: int = None, **kwargs) -> TopicInfo:
+    def create_topic(self, name: str) -> None:
         """Create a topic programmatically"""
-        return self.topic_manager.create_topic(name, partition_count, **kwargs)
+        self.storage.create_topic(name)
     
-    def list_topics(self) -> List[TopicInfo]:
+    def list_topics(self) -> List[str]:
         """List all topics"""
-        return self.topic_manager.list_topics()
+        return self.storage.list_topics()
     
-    def get_topic_stats(self, topic: str) -> Dict[str, Any]:
-        """Get topic statistics"""
-        return self.topic_manager.get_topic_stats(topic)
+    def create_subscription(self, subscription_id: str, topic: str, start_offset: int = 0) -> Subscription:
+        """Create a subscription programmatically"""
+        return self.subscription_manager.create_subscription(subscription_id, topic, start_offset)
     
     def get_broker_stats(self) -> Dict[str, Any]:
         """Get overall broker statistics"""
         topics = self.list_topics()
+        subscription_stats = self.subscription_manager.get_all_subscription_stats()
         protocol_stats = self.protocol_handler.get_stats()
-        
-        total_messages = 0
-        total_partitions = 0
-        total_subscribers = 0
-        
-        for topic in topics:
-            try:
-                stats = self.get_topic_stats(topic.name)
-                total_messages += stats['total_messages']
-                total_partitions += stats['partition_count']
-                total_subscribers += stats['subscribers']
-            except Exception:
-                pass
         
         return {
             'topics': len(topics),
-            'total_partitions': total_partitions,
-            'total_messages': total_messages,
-            'total_subscribers': total_subscribers,
+            'topic_list': topics,
+            'publishers': len(self._publishers),
+            'subscriptions': len(subscription_stats),
+            'subscription_stats': subscription_stats,
             'active_connections': protocol_stats['active_connections'],
-            'uptime': time.time() - (min([info.get('connected_at', time.time()) 
-                                        for info in self._client_info.values()]) 
-                                   if self._client_info else time.time()),
             'storage_dir': self.config.get('storage.data_dir'),
         }

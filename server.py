@@ -96,15 +96,15 @@ class BrokerServer(ThreadingTCPServer):
 def create_default_topics(broker: MessageBroker):
     """Create some default topics for testing"""
     default_topics = [
-        ('events', 2),
-        ('logs', 1),
-        ('notifications', 3),
+        'events',
+        'logs', 
+        'notifications',
     ]
     
-    for topic_name, partitions in default_topics:
+    for topic_name in default_topics:
         try:
-            broker.create_topic(topic_name, partitions)
-            logger.info(f"Created default topic: {topic_name} with {partitions} partitions")
+            broker.create_topic(topic_name)
+            logger.info(f"Created default topic: {topic_name}")
         except Exception as e:
             logger.warning(f"Failed to create default topic {topic_name}: {e}")
 
