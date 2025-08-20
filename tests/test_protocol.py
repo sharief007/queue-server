@@ -37,6 +37,12 @@ class TestClientConnection(unittest.TestCase):
         # Mock successful sendall
         self.mock_socket.sendall.return_value = None
         
+        # Record initial time
+        initial_activity = conn.last_activity
+        
+        # Small delay to ensure time difference
+        time.sleep(0.001)
+        
         # Should not raise exception
         conn.send_message(msg)
         
@@ -44,7 +50,7 @@ class TestClientConnection(unittest.TestCase):
         self.mock_socket.sendall.assert_called_once()
         
         # Check that last_activity was updated
-        self.assertGreater(conn.last_activity, conn.created_at)
+        self.assertGreater(conn.last_activity, initial_activity)
     
     def test_send_message_failure(self):
         """Test sending message with socket error"""
@@ -146,6 +152,9 @@ class TestClientConnection(unittest.TestCase):
         self.mock_socket.sendall.return_value = None
         
         old_heartbeat = conn.last_heartbeat
+        
+        # Small delay to ensure time difference
+        time.sleep(0.001)
         
         # Send heartbeat
         conn.send_heartbeat()
