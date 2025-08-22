@@ -1,6 +1,7 @@
 #pragma warning disable CS1998 // Async method lacks 'await' operators
 using System.Collections.Concurrent;
 using System.Threading.Channels;
+using Microsoft.Extensions.Logging;
 using QueueServer.Core.Models;
 using QueueServer.Core.Storage;
 
@@ -285,14 +286,31 @@ public sealed record MessageDeliveryEventArgs(
 /// </summary>
 public sealed class SubscriptionManager : IAsyncDisposable
 {
+    private readonly ILogger<SubscriptionManager> _logger;
     private readonly ConcurrentDictionary<string, Subscription> _subscriptions = new();
     private readonly ConcurrentDictionary<string, string> _subscriberToSubscription = new();
     private readonly Timer _cleanupTimer;
     private readonly TimeSpan _inactivityTimeout = TimeSpan.FromMinutes(5);
     private volatile bool _disposed;
 
+    public SubscriptionManager(ILogger<SubscriptionManager> logger)
+    {
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+
+        // Setup periodic cleanup of inactive subscribers
+        _cleanupTimer = new Timer(
+            CleanupInactiveSubscribers,
+            null,
+            TimeSpan.FromMinutes(1),
+            TimeSpan.FromMinutes(1)
+        );
+    }
+
+    // Legacy constructor for backward compatibility
     public SubscriptionManager()
     {
+        _logger = null!; // Will be null for legacy usage
+
         // Setup periodic cleanup of inactive subscribers
         _cleanupTimer = new Timer(
             CleanupInactiveSubscribers,

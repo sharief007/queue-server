@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using Microsoft.Extensions.Logging;
 using QueueServer.Core.Configuration;
 using QueueServer.Core.Models;
 
@@ -11,33 +12,43 @@ namespace QueueServer.Client;
 /// </summary>
 public sealed class BrokerClient : IAsyncDisposable
 {
+    private readonly ILogger<BrokerClient>? _logger;
     private readonly ClientConfiguration _config;
     private readonly string _clientId;
     private Socket? _socket;
     private readonly IPEndPoint _serverEndPoint;
     private readonly CancellationTokenSource _cancellationTokenSource = new();
-    
+
     // Connection state
     private ConnectionState _state = ConnectionState.Disconnected;
     private DateTime _lastHeartbeat = DateTime.UtcNow;
     private ulong _sequenceNumber;
-    
+
     // Message handling
-    private readonly ConcurrentDictionary<ulong, TaskCompletionSource<Message>> _pendingRequests = new();
-    private readonly ConcurrentDictionary<string, Func<Message, Task>> _subscriptionHandlers = new();
-    
+    private readonly ConcurrentDictionary<ulong, TaskCompletionSource<Message>> _pendingRequests =
+        new();
+    private readonly ConcurrentDictionary<string, Func<Message, Task>> _subscriptionHandlers =
+        new();
+
     // Background tasks
     private Task? _receiveTask;
     private Task? _heartbeatTask;
-    
+
     // Thread safety
     private readonly SemaphoreSlim _sendSemaphore = new(1, 1);
     private readonly object _stateLock = new();
-    
+
     private volatile bool _disposed;
 
-    public BrokerClient(string host = "127.0.0.1", int port = 9999, string? clientId = null, ClientConfiguration? config = null)
+    public BrokerClient(
+        string host = "127.0.0.1",
+        int port = 9999,
+        string? clientId = null,
+        ClientConfiguration? config = null,
+        ILogger<BrokerClient>? logger = null
+    )
     {
+        _logger = logger;
         _clientId = clientId ?? Guid.NewGuid().ToString();
         _config = config ?? new ClientConfiguration();
         _serverEndPoint = new IPEndPoint(IPAddress.Parse(host), port);
@@ -56,7 +67,7 @@ public sealed class BrokerClient : IAsyncDisposable
         {
             if (_state != ConnectionState.Disconnected)
                 throw new InvalidOperationException($"Cannot connect when state is {_state}");
-            
+
             _state = ConnectionState.Connecting;
         }
 
@@ -79,8 +90,8 @@ public sealed class BrokerClient : IAsyncDisposable
             _heartbeatTask = Task.Run(HeartbeatWorker, _cancellationTokenSource.Token);
 
             _lastHeartbeat = DateTime.UtcNow;
-            
-            Console.WriteLine($"Connected to broker at {_serverEndPoint}");
+
+            _logger?.LogInformation("Connected to broker at {ServerEndPoint}", _serverEndPoint);
         }
         catch
         {
@@ -99,7 +110,8 @@ public sealed class BrokerClient : IAsyncDisposable
     /// </summary>
     public async Task DisconnectAsync()
     {
-        if (_state == ConnectionState.Disconnected) return;
+        if (_state == ConnectionState.Disconnected)
+            return;
 
         lock (_stateLock)
         {
@@ -111,8 +123,10 @@ public sealed class BrokerClient : IAsyncDisposable
         // Wait for background tasks to complete
         try
         {
-            if (_receiveTask != null) await _receiveTask;
-            if (_heartbeatTask != null) await _heartbeatTask;
+            if (_receiveTask != null)
+                await _receiveTask;
+            if (_heartbeatTask != null)
+                await _heartbeatTask;
         }
         catch (OperationCanceledException)
         {
@@ -149,13 +163,17 @@ public sealed class BrokerClient : IAsyncDisposable
             _state = ConnectionState.Disconnected;
         }
 
-        Console.WriteLine("Disconnected from broker");
+        _logger?.LogInformation("Disconnected from broker");
     }
 
     /// <summary>
     /// Create a topic
     /// </summary>
-    public async Task<bool> CreateTopicAsync(string topicName, int retentionHours = 24, CancellationToken cancellationToken = default)
+    public async Task<bool> CreateTopicAsync(
+        string topicName,
+        int retentionHours = 24,
+        CancellationToken cancellationToken = default
+    )
     {
         var message = new MessageBuilder(MessageType.CreateTopic)
             .WithSequenceNumber(GetNextSequenceNumber())
@@ -170,7 +188,12 @@ public sealed class BrokerClient : IAsyncDisposable
     /// <summary>
     /// Create a subscription
     /// </summary>
-    public async Task<bool> CreateSubscriptionAsync(string subscriptionId, string topicName, ulong startOffset = 0, CancellationToken cancellationToken = default)
+    public async Task<bool> CreateSubscriptionAsync(
+        string subscriptionId,
+        string topicName,
+        ulong startOffset = 0,
+        CancellationToken cancellationToken = default
+    )
     {
         var message = new MessageBuilder(MessageType.CreateSubscription)
             .WithSequenceNumber(GetNextSequenceNumber())
@@ -186,7 +209,10 @@ public sealed class BrokerClient : IAsyncDisposable
     /// <summary>
     /// Delete a subscription
     /// </summary>
-    public async Task<bool> DeleteSubscriptionAsync(string subscriptionId, CancellationToken cancellationToken = default)
+    public async Task<bool> DeleteSubscriptionAsync(
+        string subscriptionId,
+        CancellationToken cancellationToken = default
+    )
     {
         var message = new MessageBuilder(MessageType.DeleteSubscription)
             .WithSequenceNumber(GetNextSequenceNumber())
@@ -200,7 +226,12 @@ public sealed class BrokerClient : IAsyncDisposable
     /// <summary>
     /// Publish a message to a topic
     /// </summary>
-    public async Task<bool> PublishAsync(string topicName, ReadOnlyMemory<byte> data, Dictionary<string, string>? properties = null, CancellationToken cancellationToken = default)
+    public async Task<bool> PublishAsync(
+        string topicName,
+        ReadOnlyMemory<byte> data,
+        Dictionary<string, string>? properties = null,
+        CancellationToken cancellationToken = default
+    )
     {
         var builder = new MessageBuilder(MessageType.Publish)
             .WithSequenceNumber(GetNextSequenceNumber())
@@ -223,7 +254,12 @@ public sealed class BrokerClient : IAsyncDisposable
     /// <summary>
     /// Publish a text message to a topic
     /// </summary>
-    public async Task<bool> PublishTextAsync(string topicName, string text, Dictionary<string, string>? properties = null, CancellationToken cancellationToken = default)
+    public async Task<bool> PublishTextAsync(
+        string topicName,
+        string text,
+        Dictionary<string, string>? properties = null,
+        CancellationToken cancellationToken = default
+    )
     {
         var data = System.Text.Encoding.UTF8.GetBytes(text);
         return await PublishAsync(topicName, data, properties, cancellationToken);
@@ -232,7 +268,11 @@ public sealed class BrokerClient : IAsyncDisposable
     /// <summary>
     /// Subscribe to a subscription
     /// </summary>
-    public async Task<bool> SubscribeAsync(string subscriptionId, Func<Message, Task> messageHandler, CancellationToken cancellationToken = default)
+    public async Task<bool> SubscribeAsync(
+        string subscriptionId,
+        Func<Message, Task> messageHandler,
+        CancellationToken cancellationToken = default
+    )
     {
         var message = new MessageBuilder(MessageType.Subscribe)
             .WithSequenceNumber(GetNextSequenceNumber())
@@ -252,7 +292,10 @@ public sealed class BrokerClient : IAsyncDisposable
     /// <summary>
     /// Unsubscribe from a subscription
     /// </summary>
-    public async Task<bool> UnsubscribeAsync(string subscriptionId, CancellationToken cancellationToken = default)
+    public async Task<bool> UnsubscribeAsync(
+        string subscriptionId,
+        CancellationToken cancellationToken = default
+    )
     {
         var message = new MessageBuilder(MessageType.Unsubscribe)
             .WithSequenceNumber(GetNextSequenceNumber())
@@ -272,7 +315,10 @@ public sealed class BrokerClient : IAsyncDisposable
     /// <summary>
     /// Send message and wait for response
     /// </summary>
-    private async Task<Message?> SendAndWaitAsync(Message message, CancellationToken cancellationToken = default)
+    private async Task<Message?> SendAndWaitAsync(
+        Message message,
+        CancellationToken cancellationToken = default
+    )
     {
         if (!IsConnected)
             throw new InvalidOperationException("Not connected to broker");
@@ -283,10 +329,12 @@ public sealed class BrokerClient : IAsyncDisposable
         try
         {
             await SendMessageAsync(message, cancellationToken);
-            
-            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken
+            );
             timeoutCts.CancelAfter(_config.RequestTimeout);
-            
+
             return await tcs.Task.WaitAsync(timeoutCts.Token);
         }
         catch (OperationCanceledException)
@@ -302,7 +350,10 @@ public sealed class BrokerClient : IAsyncDisposable
     /// <summary>
     /// Send message to broker
     /// </summary>
-    private async Task SendMessageAsync(Message message, CancellationToken cancellationToken = default)
+    private async Task SendMessageAsync(
+        Message message,
+        CancellationToken cancellationToken = default
+    )
     {
         if (_socket == null || !IsConnected)
             throw new InvalidOperationException("Not connected to broker");
@@ -312,7 +363,7 @@ public sealed class BrokerClient : IAsyncDisposable
         {
             var buffer = new byte[message.TotalSize];
             message.Serialize(buffer);
-            
+
             var sent = await _socket.SendAsync(buffer, SocketFlags.None, cancellationToken);
             if (sent != buffer.Length)
             {
@@ -347,7 +398,7 @@ public sealed class BrokerClient : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error in receive worker: {ex.Message}");
+            _logger?.LogError(ex, "Error in receive worker");
         }
     }
 
@@ -356,31 +407,40 @@ public sealed class BrokerClient : IAsyncDisposable
     /// </summary>
     private async Task<Message?> ReceiveMessageAsync(CancellationToken cancellationToken)
     {
-        if (_socket == null || !IsConnected) return null;
+        if (_socket == null || !IsConnected)
+            return null;
 
         try
         {
             // Read header
             var headerBuffer = new byte[Message.HeaderSize];
-            var received = await _socket.ReceiveAsync(headerBuffer, SocketFlags.None, cancellationToken);
-            if (received != Message.HeaderSize) return null;
+            var received = await _socket.ReceiveAsync(
+                headerBuffer,
+                SocketFlags.None,
+                cancellationToken
+            );
+            if (received != Message.HeaderSize)
+                return null;
 
             // Get total length
             var totalLength = BitConverter.ToInt32(headerBuffer, 0);
-            if (totalLength < Message.HeaderSize) return null;
+            if (totalLength < Message.HeaderSize)
+                return null;
 
             // Read complete message
             var messageBuffer = new byte[totalLength];
             Array.Copy(headerBuffer, messageBuffer, Message.HeaderSize);
-            
+
             var remaining = totalLength - Message.HeaderSize;
             if (remaining > 0)
             {
                 var remainingReceived = await _socket.ReceiveAsync(
-                    messageBuffer.AsMemory(Message.HeaderSize, remaining), 
-                    SocketFlags.None, 
-                    cancellationToken);
-                if (remainingReceived != remaining) return null;
+                    messageBuffer.AsMemory(Message.HeaderSize, remaining),
+                    SocketFlags.None,
+                    cancellationToken
+                );
+                if (remainingReceived != remaining)
+                    return null;
             }
 
             var (message, _) = Message.Deserialize(messageBuffer);
@@ -415,8 +475,10 @@ public sealed class BrokerClient : IAsyncDisposable
         if (message.MessageType == MessageType.Data)
         {
             var subscriptionId = GetProperty(message, "subscription_id");
-            if (!string.IsNullOrEmpty(subscriptionId) && 
-                _subscriptionHandlers.TryGetValue(subscriptionId, out var handler))
+            if (
+                !string.IsNullOrEmpty(subscriptionId)
+                && _subscriptionHandlers.TryGetValue(subscriptionId, out var handler)
+            )
             {
                 try
                 {
@@ -424,7 +486,11 @@ public sealed class BrokerClient : IAsyncDisposable
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Error in subscription handler: {ex.Message}");
+                    _logger?.LogError(
+                        ex,
+                        "Error in subscription handler for subscription {SubscriptionId}",
+                        subscriptionId
+                    );
                 }
             }
         }
@@ -440,20 +506,20 @@ public sealed class BrokerClient : IAsyncDisposable
             while (IsConnected && !_cancellationTokenSource.Token.IsCancellationRequested)
             {
                 await Task.Delay(_config.HeartbeatInterval, _cancellationTokenSource.Token);
-                
+
                 if (IsConnected)
                 {
                     var heartbeat = new MessageBuilder(MessageType.Heartbeat)
                         .WithSequenceNumber(GetNextSequenceNumber())
                         .Build();
-                    
+
                     try
                     {
                         await SendMessageAsync(heartbeat, _cancellationTokenSource.Token);
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"Error sending heartbeat: {ex.Message}");
+                        _logger?.LogError(ex, "Error sending heartbeat");
                     }
                 }
             }
@@ -496,8 +562,9 @@ public sealed class BrokerClient : IAsyncDisposable
     private static Dictionary<string, string> ParseProperties(ReadOnlySpan<byte> data)
     {
         var properties = new Dictionary<string, string>();
-        
-        if (data.Length == 0) return properties;
+
+        if (data.Length == 0)
+            return properties;
 
         var position = 0;
         while (position < data.Length)
@@ -508,11 +575,12 @@ public sealed class BrokerClient : IAsyncDisposable
                 position++;
             }
 
-            if (position >= data.Length) break;
+            if (position >= data.Length)
+                break;
 
             var propertyData = data[start..position];
             var equalPos = propertyData.IndexOf((byte)'=');
-            
+
             if (equalPos > 0 && equalPos < propertyData.Length - 1)
             {
                 var key = System.Text.Encoding.UTF8.GetString(propertyData[..equalPos]);
@@ -528,7 +596,8 @@ public sealed class BrokerClient : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed) return;
+        if (_disposed)
+            return;
         _disposed = true;
 
         await DisconnectAsync();

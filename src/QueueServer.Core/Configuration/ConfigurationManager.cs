@@ -22,13 +22,8 @@ public sealed record ServerConfiguration
 public sealed record StorageConfiguration
 {
     public string DataDirectory { get; init; } = "./storage/data";
-    public string SnapshotDirectory { get; init; } = "./storage/snapshots";
-    public TimeSpan SnapshotInterval { get; init; } = TimeSpan.FromMinutes(1);
     public long MaxLogSize { get; init; } = 100 * 1024 * 1024; // 100MB
-    public TimeSpan SyncInterval { get; init; } = TimeSpan.FromSeconds(1);
-    public int MemoryCacheSize { get; init; } = 1000;
     public bool FsyncOnWrite { get; init; } = true;
-    public int SegmentSize { get; init; } = 100_000;
     public int BatchSize { get; init; } = 64 * 1024; // 64KB
     public int BatchCount { get; init; } = 100;
     public TimeSpan BatchTimeout { get; init; } = TimeSpan.FromMilliseconds(100);
@@ -77,7 +72,9 @@ public sealed record BrokerConfiguration
 /// </summary>
 public sealed class ConfigurationManager
 {
-    private static readonly Lazy<ConfigurationManager> _instance = new(() => new ConfigurationManager());
+    private static readonly Lazy<ConfigurationManager> _instance = new(() =>
+        new ConfigurationManager()
+    );
     public static ConfigurationManager Instance => _instance.Value;
 
     private BrokerConfiguration _configuration;
@@ -111,12 +108,15 @@ public sealed class ConfigurationManager
             try
             {
                 var json = File.ReadAllText(configFile);
-                var fileConfig = JsonSerializer.Deserialize<BrokerConfiguration>(json, new JsonSerializerOptions
-                {
-                    PropertyNameCaseInsensitive = true,
-                    ReadCommentHandling = JsonCommentHandling.Skip
-                });
-                
+                var fileConfig = JsonSerializer.Deserialize<BrokerConfiguration>(
+                    json,
+                    new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true,
+                        ReadCommentHandling = JsonCommentHandling.Skip,
+                    }
+                );
+
                 if (fileConfig != null)
                 {
                     config = fileConfig;
@@ -124,7 +124,10 @@ public sealed class ConfigurationManager
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Warning: Failed to load configuration from {configFile}: {ex.Message}");
+                // Note: Cannot use ILogger here as this is called during DI setup
+                // Will be handled by the consuming application
+                throw new InvalidOperationException(
+                    $"Failed to load configuration from {configFile}: {ex.Message}", ex);
             }
         }
 
@@ -145,48 +148,62 @@ public sealed class ConfigurationManager
         if (Environment.GetEnvironmentVariable("QB_SERVER_HOST") is { } host)
             serverConfig = serverConfig with { Host = host };
 
-        if (Environment.GetEnvironmentVariable("QB_SERVER_PORT") is { } portStr &&
-            int.TryParse(portStr, out var port))
+        if (
+            Environment.GetEnvironmentVariable("QB_SERVER_PORT") is { } portStr
+            && int.TryParse(portStr, out var port)
+        )
             serverConfig = serverConfig with { Port = port };
 
-        if (Environment.GetEnvironmentVariable("QB_SERVER_MAX_CONNECTIONS") is { } maxConnStr &&
-            int.TryParse(maxConnStr, out var maxConn))
+        if (
+            Environment.GetEnvironmentVariable("QB_SERVER_MAX_CONNECTIONS") is { } maxConnStr
+            && int.TryParse(maxConnStr, out var maxConn)
+        )
             serverConfig = serverConfig with { MaxConnections = maxConn };
 
         // Storage configuration
         if (Environment.GetEnvironmentVariable("QB_STORAGE_DATA_DIR") is { } dataDir)
             storageConfig = storageConfig with { DataDirectory = dataDir };
 
-        if (Environment.GetEnvironmentVariable("QB_STORAGE_SNAPSHOT_DIR") is { } snapshotDir)
-            storageConfig = storageConfig with { SnapshotDirectory = snapshotDir };
-
-        if (Environment.GetEnvironmentVariable("QB_STORAGE_MAX_LOG_SIZE") is { } maxLogSizeStr &&
-            long.TryParse(maxLogSizeStr, out var maxLogSize))
+        if (
+            Environment.GetEnvironmentVariable("QB_STORAGE_MAX_LOG_SIZE") is { } maxLogSizeStr
+            && long.TryParse(maxLogSizeStr, out var maxLogSize)
+        )
             storageConfig = storageConfig with { MaxLogSize = maxLogSize };
 
-        if (Environment.GetEnvironmentVariable("QB_STORAGE_BATCH_SIZE") is { } batchSizeStr &&
-            int.TryParse(batchSizeStr, out var batchSize))
+        if (
+            Environment.GetEnvironmentVariable("QB_STORAGE_BATCH_SIZE") is { } batchSizeStr
+            && int.TryParse(batchSizeStr, out var batchSize)
+        )
             storageConfig = storageConfig with { BatchSize = batchSize };
 
-        if (Environment.GetEnvironmentVariable("QB_STORAGE_COMPRESSION") is { } compressionStr &&
-            bool.TryParse(compressionStr, out var compression))
+        if (
+            Environment.GetEnvironmentVariable("QB_STORAGE_COMPRESSION") is { } compressionStr
+            && bool.TryParse(compressionStr, out var compression)
+        )
             storageConfig = storageConfig with { CompressionEnabled = compression };
 
         // Topic configuration
-        if (Environment.GetEnvironmentVariable("QB_TOPICS_DEFAULT_PARTITIONS") is { } defaultPartStr &&
-            int.TryParse(defaultPartStr, out var defaultPart))
+        if (
+            Environment.GetEnvironmentVariable("QB_TOPICS_DEFAULT_PARTITIONS") is { } defaultPartStr
+            && int.TryParse(defaultPartStr, out var defaultPart)
+        )
             topicsConfig = topicsConfig with { DefaultPartitions = defaultPart };
 
-        if (Environment.GetEnvironmentVariable("QB_TOPICS_RETENTION_HOURS") is { } retentionStr &&
-            int.TryParse(retentionStr, out var retentionHours))
-            topicsConfig = topicsConfig with { RetentionPeriod = TimeSpan.FromHours(retentionHours) };
+        if (
+            Environment.GetEnvironmentVariable("QB_TOPICS_RETENTION_HOURS") is { } retentionStr
+            && int.TryParse(retentionStr, out var retentionHours)
+        )
+            topicsConfig = topicsConfig with
+            {
+                RetentionPeriod = TimeSpan.FromHours(retentionHours),
+            };
 
         return config with
         {
             Server = serverConfig,
             Storage = storageConfig,
             Topics = topicsConfig,
-            Client = clientConfig
+            Client = clientConfig,
         };
     }
 }

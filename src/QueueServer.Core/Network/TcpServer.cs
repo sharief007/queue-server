@@ -3,6 +3,8 @@ using System.Buffers;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using QueueServer.Core.Configuration;
 using QueueServer.Core.Models;
 
@@ -19,16 +21,16 @@ public sealed class ClientConnection : IAsyncDisposable
     private readonly ServerConfiguration _config;
     private readonly CancellationTokenSource _cancellationTokenSource = new();
     private readonly ArrayPool<byte> _bufferPool = ArrayPool<byte>.Shared;
-    
+
     // Connection state
     private ConnectionState _state = ConnectionState.Connected;
     private DateTime _lastActivity = DateTime.UtcNow;
     private DateTime _lastHeartbeat = DateTime.UtcNow;
-    
+
     // Send/receive buffers
     private readonly object _sendLock = new();
     private readonly SemaphoreSlim _receiveSemaphore = new(1, 1);
-    
+
     private volatile bool _disposed;
 
     public ClientConnection(Socket socket, string connectionId, ServerConfiguration config)
@@ -37,7 +39,7 @@ public sealed class ClientConnection : IAsyncDisposable
         _connectionId = connectionId;
         _remoteEndPoint = socket.RemoteEndPoint ?? new IPEndPoint(IPAddress.None, 0);
         _config = config;
-        
+
         // Configure socket options for performance
         _socket.NoDelay = true;
         _socket.ReceiveBufferSize = _config.ReceiveBufferSize;
@@ -56,9 +58,13 @@ public sealed class ClientConnection : IAsyncDisposable
     /// <summary>
     /// Send a message asynchronously with zero-copy when possible
     /// </summary>
-    public async Task<bool> SendMessageAsync(Message message, CancellationToken cancellationToken = default)
+    public async Task<bool> SendMessageAsync(
+        Message message,
+        CancellationToken cancellationToken = default
+    )
     {
-        if (_disposed || !IsConnected) return false;
+        if (_disposed || !IsConnected)
+            return false;
 
         try
         {
@@ -95,9 +101,12 @@ public sealed class ClientConnection : IAsyncDisposable
     /// <summary>
     /// Receive a message asynchronously
     /// </summary>
-    public async Task<(Message? Message, bool Success)> ReceiveMessageAsync(CancellationToken cancellationToken = default)
+    public async Task<(Message? Message, bool Success)> ReceiveMessageAsync(
+        CancellationToken cancellationToken = default
+    )
     {
-        if (_disposed || !IsConnected) return (null, false);
+        if (_disposed || !IsConnected)
+            return (null, false);
 
         await _receiveSemaphore.WaitAsync(cancellationToken);
         try
@@ -107,7 +116,7 @@ public sealed class ClientConnection : IAsyncDisposable
             try
             {
                 var headerMemory = headerBuffer.AsMemory(0, Message.HeaderSize);
-                
+
                 var bytesReceived = await ReceiveExactAsync(headerMemory, cancellationToken);
                 if (bytesReceived != Message.HeaderSize)
                 {
@@ -126,10 +135,10 @@ public sealed class ClientConnection : IAsyncDisposable
                 try
                 {
                     var messageMemory = messageBuffer.AsMemory(0, totalLength);
-                    
+
                     // Copy header to message buffer
                     headerMemory.CopyTo(messageMemory);
-                    
+
                     // Read remaining data
                     var remainingLength = totalLength - Message.HeaderSize;
                     if (remainingLength > 0)
@@ -171,27 +180,39 @@ public sealed class ClientConnection : IAsyncDisposable
     /// <summary>
     /// Receive exact number of bytes
     /// </summary>
-    private async Task<int> ReceiveExactAsync(Memory<byte> buffer, CancellationToken cancellationToken)
+    private async Task<int> ReceiveExactAsync(
+        Memory<byte> buffer,
+        CancellationToken cancellationToken
+    )
     {
         var totalReceived = 0;
         var remaining = buffer.Length;
-        
+
         while (remaining > 0 && !cancellationToken.IsCancellationRequested)
         {
             var received = await Task.Factory.FromAsync(
-                (callback, state) => _socket.BeginReceive(buffer.Span[totalReceived..].ToArray(), 0, remaining, SocketFlags.None, callback, state),
+                (callback, state) =>
+                    _socket.BeginReceive(
+                        buffer.Span[totalReceived..].ToArray(),
+                        0,
+                        remaining,
+                        SocketFlags.None,
+                        callback,
+                        state
+                    ),
                 _socket.EndReceive,
-                null);
-                
+                null
+            );
+
             if (received == 0)
             {
                 break; // Connection closed
             }
-            
+
             totalReceived += received;
             remaining -= received;
         }
-        
+
         return totalReceived;
     }
 
@@ -209,11 +230,14 @@ public sealed class ClientConnection : IAsyncDisposable
     /// </summary>
     public bool IsHealthy()
     {
-        if (_disposed || !IsConnected) return false;
-        
+        if (_disposed || !IsConnected)
+            return false;
+
         var now = DateTime.UtcNow;
-        var heartbeatTimeout = _lastHeartbeat.Add(_config.HeartbeatInterval.Add(_config.HeartbeatInterval));
-        
+        var heartbeatTimeout = _lastHeartbeat.Add(
+            _config.HeartbeatInterval.Add(_config.HeartbeatInterval)
+        );
+
         return now < heartbeatTimeout;
     }
 
@@ -222,10 +246,11 @@ public sealed class ClientConnection : IAsyncDisposable
     /// </summary>
     public async Task DisconnectAsync()
     {
-        if (_state == ConnectionState.Disconnected) return;
-        
+        if (_state == ConnectionState.Disconnected)
+            return;
+
         _state = ConnectionState.Disconnecting;
-        
+
         try
         {
             if (_socket.Connected)
@@ -245,11 +270,12 @@ public sealed class ClientConnection : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed) return;
+        if (_disposed)
+            return;
         _disposed = true;
 
         await DisconnectAsync();
-        
+
         _cancellationTokenSource.Cancel();
         _socket.Dispose();
         _cancellationTokenSource.Dispose();
@@ -262,30 +288,76 @@ public sealed class ClientConnection : IAsyncDisposable
 /// </summary>
 public sealed class TcpServer : IAsyncDisposable
 {
+    private readonly ILogger<TcpServer> _logger;
     private readonly ServerConfiguration _config;
     private readonly Socket _listenSocket;
     private readonly CancellationTokenSource _cancellationTokenSource = new();
     private readonly ConcurrentDictionary<string, ClientConnection> _connections = new();
     private readonly SemaphoreSlim _connectionSemaphore;
     private readonly Timer _healthCheckTimer;
-    
+
     private volatile bool _isRunning;
     private volatile bool _disposed;
     private Task? _acceptTask;
 
-    public TcpServer(ServerConfiguration config)
+    public TcpServer(ILogger<TcpServer> logger, IOptions<ServerOptions> options)
     {
-        _config = config;
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+
+        var serverOptions = options?.Value ?? throw new ArgumentNullException(nameof(options));
+        _config = new ServerConfiguration
+        {
+            Host = serverOptions.Host,
+            Port = serverOptions.Port,
+            MaxConnections = serverOptions.MaxConnections,
+            SendBufferSize = serverOptions.SendBufferSize,
+            ReceiveBufferSize = serverOptions.ReceiveBufferSize,
+            HeartbeatInterval = serverOptions.HeartbeatInterval,
+        };
+
         _connectionSemaphore = new SemaphoreSlim(_config.MaxConnections, _config.MaxConnections);
-        
+
         // Create and configure listen socket
         _listenSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-        _listenSocket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+        _listenSocket.SetSocketOption(
+            SocketOptionLevel.Socket,
+            SocketOptionName.ReuseAddress,
+            true
+        );
         _listenSocket.NoDelay = true;
-        
+
         // Setup health check timer
-        _healthCheckTimer = new Timer(CheckConnectionHealth, null, 
-            TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+        _healthCheckTimer = new Timer(
+            CheckConnectionHealth,
+            null,
+            TimeSpan.FromSeconds(30),
+            TimeSpan.FromSeconds(30)
+        );
+    }
+
+    // Legacy constructor for backward compatibility
+    public TcpServer(ServerConfiguration config)
+    {
+        _logger = null!; // Will be null for legacy usage
+        _config = config;
+        _connectionSemaphore = new SemaphoreSlim(_config.MaxConnections, _config.MaxConnections);
+
+        // Create and configure listen socket
+        _listenSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        _listenSocket.SetSocketOption(
+            SocketOptionLevel.Socket,
+            SocketOptionName.ReuseAddress,
+            true
+        );
+        _listenSocket.NoDelay = true;
+
+        // Setup health check timer
+        _healthCheckTimer = new Timer(
+            CheckConnectionHealth,
+            null,
+            TimeSpan.FromSeconds(30),
+            TimeSpan.FromSeconds(30)
+        );
     }
 
     public bool IsRunning => _isRunning;
@@ -306,16 +378,17 @@ public sealed class TcpServer : IAsyncDisposable
     /// </summary>
     public async Task StartAsync()
     {
-        if (_isRunning) return;
-        
+        if (_isRunning)
+            return;
+
         var endpoint = new IPEndPoint(IPAddress.Parse(_config.Host), _config.Port);
         _listenSocket.Bind(endpoint);
         _listenSocket.Listen(_config.MaxConnections);
-        
+
         _isRunning = true;
         _acceptTask = Task.Run(AcceptClients, _cancellationTokenSource.Token);
-        
-        Console.WriteLine($"TCP Server started on {endpoint}");
+
+        _logger?.LogInformation("TCP Server started on {Endpoint}", endpoint);
     }
 
     /// <summary>
@@ -323,11 +396,12 @@ public sealed class TcpServer : IAsyncDisposable
     /// </summary>
     public async Task StopAsync()
     {
-        if (!_isRunning) return;
-        
+        if (!_isRunning)
+            return;
+
         _isRunning = false;
         _cancellationTokenSource.Cancel();
-        
+
         try
         {
             _listenSocket.Close();
@@ -340,12 +414,12 @@ public sealed class TcpServer : IAsyncDisposable
         {
             // Expected
         }
-        
+
         // Disconnect all clients
         await Task.WhenAll(_connections.Values.Select(conn => conn.DisposeAsync().AsTask()));
         _connections.Clear();
-        
-        Console.WriteLine("TCP Server stopped");
+
+        _logger?.LogInformation("TCP Server stopped");
     }
 
     /// <summary>
@@ -365,7 +439,7 @@ public sealed class TcpServer : IAsyncDisposable
         {
             await connection.DisposeAsync();
             _connectionSemaphore.Release();
-            
+
             try
             {
                 if (ClientDisconnected != null)
@@ -377,10 +451,10 @@ public sealed class TcpServer : IAsyncDisposable
             {
                 // Ignore errors in event handlers
             }
-            
+
             return true;
         }
-        
+
         return false;
     }
 
@@ -395,35 +469,43 @@ public sealed class TcpServer : IAsyncDisposable
             {
                 // Wait for connection slot
                 await _connectionSemaphore.WaitAsync(_cancellationTokenSource.Token);
-                
+
                 // Accept client
                 var clientSocket = await Task.Factory.FromAsync(
                     _listenSocket.BeginAccept,
                     _listenSocket.EndAccept,
-                    null);
-                
+                    null
+                );
+
                 // Create connection
                 var connectionId = Guid.NewGuid().ToString();
                 var connection = new ClientConnection(clientSocket, connectionId, _config);
-                
+
                 if (_connections.TryAdd(connectionId, connection))
                 {
                     // Handle client connection
-                    _ = Task.Run(async () =>
-                    {
-                        try
+                    _ = Task.Run(
+                        async () =>
                         {
-                            if (ClientConnected != null)
+                            try
                             {
-                                await ClientConnected(connection);
+                                if (ClientConnected != null)
+                                {
+                                    await ClientConnected(connection);
+                                }
                             }
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"Error handling client connection: {ex.Message}");
-                            await RemoveConnectionAsync(connectionId);
-                        }
-                    }, _cancellationTokenSource.Token);
+                            catch (Exception ex)
+                            {
+                                _logger?.LogError(
+                                    ex,
+                                    "Error handling client connection {ConnectionId}",
+                                    connectionId
+                                );
+                                await RemoveConnectionAsync(connectionId);
+                            }
+                        },
+                        _cancellationTokenSource.Token
+                    );
                 }
                 else
                 {
@@ -437,7 +519,7 @@ public sealed class TcpServer : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error accepting client: {ex.Message}");
+                _logger?.LogError(ex, "Error accepting client connection");
                 _connectionSemaphore.Release();
             }
         }
@@ -448,10 +530,11 @@ public sealed class TcpServer : IAsyncDisposable
     /// </summary>
     private void CheckConnectionHealth(object? state)
     {
-        if (_disposed || !_isRunning) return;
-        
+        if (_disposed || !_isRunning)
+            return;
+
         var unhealthyConnections = new List<string>();
-        
+
         foreach (var (connectionId, connection) in _connections)
         {
             if (!connection.IsHealthy())
@@ -459,7 +542,7 @@ public sealed class TcpServer : IAsyncDisposable
                 unhealthyConnections.Add(connectionId);
             }
         }
-        
+
         foreach (var connectionId in unhealthyConnections)
         {
             _ = Task.Run(() => RemoveConnectionAsync(connectionId));
@@ -468,11 +551,12 @@ public sealed class TcpServer : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed) return;
+        if (_disposed)
+            return;
         _disposed = true;
 
         await StopAsync();
-        
+
         _healthCheckTimer?.Dispose();
         _listenSocket?.Dispose();
         _cancellationTokenSource.Dispose();

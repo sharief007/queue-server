@@ -30,7 +30,6 @@ public class ProtocolHandlerTests : IAsyncDisposable
         _storageConfig = new StorageConfiguration
         {
             DataDirectory = _testDataPath,
-            SnapshotDirectory = Path.Combine(_testDataPath, "snapshots"),
             FsyncInterval = TimeSpan.FromMilliseconds(100),
         };
     }

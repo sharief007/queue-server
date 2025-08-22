@@ -1,4 +1,5 @@
 #pragma warning disable CS1998 // Async method lacks 'await' operators
+using Microsoft.Extensions.Logging;
 using QueueServer.Core.Models;
 using QueueServer.Core.Network;
 using QueueServer.Core.Storage;
@@ -25,14 +26,27 @@ public sealed record ProtocolResponse(Message Message, bool Success, string? Err
 /// </summary>
 public sealed class ProtocolHandler
 {
+    private readonly ILogger<ProtocolHandler> _logger;
     private readonly SequentialStorageManager _storageManager;
     private readonly SubscriptionManager _subscriptionManager;
 
+    public ProtocolHandler(
+        ILogger<ProtocolHandler> logger,
+        SequentialStorageManager storageManager,
+        SubscriptionManager subscriptionManager)
+    {
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _storageManager = storageManager ?? throw new ArgumentNullException(nameof(storageManager));
+        _subscriptionManager = subscriptionManager ?? throw new ArgumentNullException(nameof(subscriptionManager));
+    }
+
+    // Legacy constructor for backward compatibility
     public ProtocolHandler(
         SequentialStorageManager storageManager,
         SubscriptionManager subscriptionManager
     )
     {
+        _logger = null!; // Will be null for legacy usage
         _storageManager = storageManager;
         _subscriptionManager = subscriptionManager;
     }
@@ -363,9 +377,7 @@ public sealed class ProtocolHandler
             }
             catch (Exception ex)
             {
-                Console.WriteLine(
-                    $"Error notifying subscription {subscription.SubscriptionId}: {ex.Message}"
-                );
+                _logger?.LogError(ex, "Error notifying subscription {SubscriptionId}", subscription.SubscriptionId);
             }
         }
     }

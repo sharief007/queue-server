@@ -1,5 +1,4 @@
 using QueueServer.Client;
-using QueueServer.Core.Models;
 
 namespace QueueServer.CLI;
 
@@ -19,7 +18,7 @@ internal static class Program
         var command = args[0].ToLowerInvariant();
         var host = GetArgument(args, "--host") ?? "127.0.0.1";
         var portStr = GetArgument(args, "--port") ?? "9999";
-        
+
         if (!int.TryParse(portStr, out var port))
         {
             Console.WriteLine("Invalid port number");
@@ -39,7 +38,7 @@ internal static class Program
                 "publish" => await Publish(client, args),
                 "subscribe" => await Subscribe(client, args),
                 "benchmark" => await Benchmark(client, args),
-                _ => InvalidCommand()
+                _ => InvalidCommand(),
             };
         }
         catch (Exception ex)
@@ -48,7 +47,7 @@ internal static class Program
             return 1;
         }
     }
-    
+
     private static int InvalidCommand()
     {
         ShowUsage();
@@ -65,7 +64,9 @@ internal static class Program
         Console.WriteLine();
         Console.WriteLine("Commands:");
         Console.WriteLine("  create-topic <topic-name> [--retention-hours <hours>]");
-        Console.WriteLine("  create-subscription <subscription-id> <topic-name> [--start-offset <offset>]");
+        Console.WriteLine(
+            "  create-subscription <subscription-id> <topic-name> [--start-offset <offset>]"
+        );
         Console.WriteLine("  delete-subscription <subscription-id>");
         Console.WriteLine("  publish <topic-name> <message> [--property key=value]...");
         Console.WriteLine("  subscribe <subscription-id> [--count <max-messages>]");
@@ -93,7 +94,7 @@ internal static class Program
 
         var topicName = args[1];
         var retentionStr = GetArgument(args, "--retention-hours") ?? "24";
-        
+
         if (!int.TryParse(retentionStr, out var retentionHours))
         {
             Console.WriteLine("Invalid retention hours");
@@ -117,14 +118,16 @@ internal static class Program
     {
         if (args.Length < 3)
         {
-            Console.WriteLine("Usage: create-subscription <subscription-id> <topic-name> [--start-offset <offset>]");
+            Console.WriteLine(
+                "Usage: create-subscription <subscription-id> <topic-name> [--start-offset <offset>]"
+            );
             return 1;
         }
 
         var subscriptionId = args[1];
         var topicName = args[2];
         var offsetStr = GetArgument(args, "--start-offset") ?? "0";
-        
+
         if (!ulong.TryParse(offsetStr, out var startOffset))
         {
             Console.WriteLine("Invalid start offset");
@@ -201,7 +204,8 @@ internal static class Program
 
         var subscriptionId = args[1];
         var countStr = GetArgument(args, "--count");
-        var maxMessages = countStr != null && int.TryParse(countStr, out var count) ? count : int.MaxValue;
+        var maxMessages =
+            countStr != null && int.TryParse(countStr, out var count) ? count : int.MaxValue;
 
         var messagesReceived = 0;
         var cts = new CancellationTokenSource();
@@ -213,20 +217,25 @@ internal static class Program
             cts.Cancel();
         };
 
-        var success = await client.SubscribeAsync(subscriptionId, message =>
-        {
-            var body = System.Text.Encoding.UTF8.GetString(message.Body.Span);
-            var timestamp = DateTimeOffset.FromUnixTimeMilliseconds(message.Timestamp);
-            
-            Console.WriteLine($"[{timestamp:yyyy-MM-dd HH:mm:ss.fff}] Offset {message.SequenceNumber}: {body}");
-            
-            if (++messagesReceived >= maxMessages)
+        var success = await client.SubscribeAsync(
+            subscriptionId,
+            message =>
             {
-                cts.Cancel();
+                var body = System.Text.Encoding.UTF8.GetString(message.Body.Span);
+                var timestamp = DateTimeOffset.FromUnixTimeMilliseconds(message.Timestamp);
+
+                Console.WriteLine(
+                    $"[{timestamp:yyyy-MM-dd HH:mm:ss.fff}] Offset {message.SequenceNumber}: {body}"
+                );
+
+                if (++messagesReceived >= maxMessages)
+                {
+                    cts.Cancel();
+                }
+
+                return Task.CompletedTask;
             }
-            
-            return Task.CompletedTask;
-        });
+        );
 
         if (!success)
         {
@@ -256,8 +265,10 @@ internal static class Program
         var topicName = GetArgument(args, "--topic") ?? "benchmark";
         var messageSizeStr = GetArgument(args, "--size") ?? "64";
 
-        if (!int.TryParse(messageCountStr, out var messageCount) ||
-            !int.TryParse(messageSizeStr, out var messageSize))
+        if (
+            !int.TryParse(messageCountStr, out var messageCount)
+            || !int.TryParse(messageSizeStr, out var messageSize)
+        )
         {
             Console.WriteLine("Invalid benchmark parameters");
             return 1;
@@ -269,7 +280,9 @@ internal static class Program
         // Generate test message
         var testMessage = new string('A', messageSize);
 
-        Console.WriteLine($"Starting benchmark: {messageCount} messages of {messageSize} bytes each");
+        Console.WriteLine(
+            $"Starting benchmark: {messageCount} messages of {messageSize} bytes each"
+        );
         Console.WriteLine($"Topic: {topicName}");
 
         var startTime = DateTime.UtcNow;
@@ -277,13 +290,18 @@ internal static class Program
 
         for (var i = 0; i < messageCount; i++)
         {
-            var success = await client.PublishTextAsync(topicName, testMessage, new Dictionary<string, string>
-            {
-                ["message_id"] = i.ToString(),
-                ["timestamp"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString()
-            });
+            var success = await client.PublishTextAsync(
+                topicName,
+                testMessage,
+                new Dictionary<string, string>
+                {
+                    ["message_id"] = i.ToString(),
+                    ["timestamp"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(),
+                }
+            );
 
-            if (success) successCount++;
+            if (success)
+                successCount++;
 
             if ((i + 1) % 100 == 0)
             {
@@ -322,7 +340,7 @@ internal static class Program
     private static Dictionary<string, string>? ParseProperties(string[] args)
     {
         var properties = new Dictionary<string, string>();
-        
+
         for (var i = 0; i < args.Length - 1; i++)
         {
             if (args[i].Equals("--property", StringComparison.OrdinalIgnoreCase))

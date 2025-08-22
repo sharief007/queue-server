@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using QueueServer.Core.Configuration;
 using QueueServer.Core.Models;
 using QueueServer.Core.Network;
@@ -14,36 +16,40 @@ namespace QueueServer.Core.Broker;
 public sealed class MessageBroker : IAsyncDisposable
 {
     private readonly BrokerConfiguration _config;
+    private readonly ILogger<MessageBroker> _logger;
     private readonly SequentialStorageManager _storageManager;
     private readonly SubscriptionManager _subscriptionManager;
     private readonly ProtocolHandler _protocolHandler;
     private readonly TcpServer _tcpServer;
-    
+
     // Connection tracking
     private readonly ConcurrentDictionary<string, ClientConnection> _connections = new();
     private readonly ConcurrentDictionary<string, string> _connectionToSubscriber = new();
-    
+
     // Background tasks
     private readonly CancellationTokenSource _cancellationTokenSource = new();
     private readonly List<Task> _backgroundTasks = new();
-    
+
     private volatile bool _isRunning;
     private volatile bool _disposed;
 
-    public MessageBroker(BrokerConfiguration? config = null)
+    public MessageBroker(
+        ILogger<MessageBroker> logger,
+        BrokerConfiguration? config = null)
     {
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _config = config ?? ConfigurationManager.Instance.Configuration;
-        
+
         // Initialize components
         _storageManager = new SequentialStorageManager(_config.Storage);
         _subscriptionManager = new SubscriptionManager();
         _protocolHandler = new ProtocolHandler(_storageManager, _subscriptionManager);
         _tcpServer = new TcpServer(_config.Server);
-        
+
         // Wire up events
         _tcpServer.ClientConnected += OnClientConnected;
         _tcpServer.ClientDisconnected += OnClientDisconnected;
-        
+
         // Subscribe to message delivery events
         WireUpMessageDelivery();
     }
@@ -58,21 +64,21 @@ public sealed class MessageBroker : IAsyncDisposable
     public async Task StartAsync()
     {
         if (_isRunning) return;
-        
-        Console.WriteLine("Starting Message Broker...");
-        
+
+        _logger.LogInformation("Starting Message Broker...");
+
         // Start TCP server
         await _tcpServer.StartAsync();
-        
+
         // Start background tasks
         StartBackgroundTasks();
-        
+
         _isRunning = true;
-        
-        Console.WriteLine($"Message Broker started successfully");
-        Console.WriteLine($"- Server: {_config.Server.Host}:{_config.Server.Port}");
-        Console.WriteLine($"- Storage: {_config.Storage.DataDirectory}");
-        Console.WriteLine($"- Max Connections: {_config.Server.MaxConnections}");
+
+        _logger.LogInformation("Message Broker started successfully");
+        _logger.LogInformation("- Server: {Host}:{Port}", _config.Server.Host, _config.Server.Port);
+        _logger.LogInformation("- Storage: {DataDirectory}", _config.Storage.DataDirectory);
+        _logger.LogInformation("- Max Connections: {MaxConnections}", _config.Server.MaxConnections);
     }
 
     /// <summary>
@@ -81,15 +87,15 @@ public sealed class MessageBroker : IAsyncDisposable
     public async Task StopAsync()
     {
         if (!_isRunning) return;
-        
-        Console.WriteLine("Stopping Message Broker...");
-        
+
+        _logger.LogInformation("Stopping Message Broker...");
+
         _isRunning = false;
         _cancellationTokenSource.Cancel();
-        
+
         // Stop TCP server
         await _tcpServer.StopAsync();
-        
+
         // Wait for background tasks to complete
         try
         {
@@ -99,12 +105,12 @@ public sealed class MessageBroker : IAsyncDisposable
         {
             // Expected
         }
-        
+
         // Clear connections
         _connections.Clear();
         _connectionToSubscriber.Clear();
-        
-        Console.WriteLine("Message Broker stopped");
+
+        _logger.LogInformation("Message Broker stopped");
     }
 
     /// <summary>
@@ -144,9 +150,10 @@ public sealed class MessageBroker : IAsyncDisposable
     private Task OnClientConnected(ClientConnection connection)
     {
         _connections[connection.ConnectionId] = connection;
-        
-        Console.WriteLine($"Client connected: {connection.RemoteEndPoint} ({connection.ConnectionId})");
-        
+
+        _logger.LogInformation("Client connected: {RemoteEndPoint} ({ConnectionId})",
+            connection.RemoteEndPoint, connection.ConnectionId);
+
         // Start handling messages from this client
         _ = Task.Run(() => HandleClientMessages(connection), _cancellationTokenSource.Token);
         return Task.CompletedTask;
@@ -158,14 +165,15 @@ public sealed class MessageBroker : IAsyncDisposable
     private Task OnClientDisconnected(ClientConnection connection)
     {
         _connections.TryRemove(connection.ConnectionId, out _);
-        
+
         // Remove from any subscriptions
         if (_connectionToSubscriber.TryRemove(connection.ConnectionId, out var subscriberId))
         {
             _subscriptionManager.RemoveSubscriber(subscriberId);
         }
-        
-        Console.WriteLine($"Client disconnected: {connection.RemoteEndPoint} ({connection.ConnectionId})");
+
+        _logger.LogInformation("Client disconnected: {RemoteEndPoint} ({ConnectionId})",
+            connection.RemoteEndPoint, connection.ConnectionId);
         return Task.CompletedTask;
     }
 
@@ -179,7 +187,7 @@ public sealed class MessageBroker : IAsyncDisposable
             while (connection.IsConnected && _isRunning && !_cancellationTokenSource.Token.IsCancellationRequested)
             {
                 var (message, success) = await connection.ReceiveMessageAsync(_cancellationTokenSource.Token);
-                
+
                 if (!success || message == null)
                 {
                     break;
@@ -187,10 +195,10 @@ public sealed class MessageBroker : IAsyncDisposable
 
                 // Create protocol request
                 var request = new ProtocolRequest(connection, message.Value, Guid.NewGuid().ToString());
-                
+
                 // Handle the request
                 var response = await _protocolHandler.HandleMessageAsync(request);
-                
+
                 // Send response if needed
                 if (response.Success)
                 {
@@ -198,7 +206,8 @@ public sealed class MessageBroker : IAsyncDisposable
                 }
                 else
                 {
-                    Console.WriteLine($"Protocol error for connection {connection.ConnectionId}: {response.ErrorMessage}");
+                    _logger.LogWarning("Protocol error for connection {ConnectionId}: {ErrorMessage}",
+                        connection.ConnectionId, response.ErrorMessage);
                     await connection.SendMessageAsync(response.Message, _cancellationTokenSource.Token);
                 }
             }
@@ -209,7 +218,7 @@ public sealed class MessageBroker : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error handling client {connection.ConnectionId}: {ex.Message}");
+            _logger.LogError(ex, "Error handling client {ConnectionId}", connection.ConnectionId);
         }
         finally
         {
@@ -224,7 +233,7 @@ public sealed class MessageBroker : IAsyncDisposable
     {
         // Heartbeat monitor task
         _backgroundTasks.Add(Task.Run(HeartbeatMonitor, _cancellationTokenSource.Token));
-        
+
         // Statistics reporting task
         _backgroundTasks.Add(Task.Run(StatisticsReporter, _cancellationTokenSource.Token));
     }
@@ -239,7 +248,7 @@ public sealed class MessageBroker : IAsyncDisposable
             try
             {
                 var unhealthyConnections = new List<string>();
-                
+
                 foreach (var (connectionId, connection) in _connections)
                 {
                     if (!connection.IsHealthy())
@@ -247,13 +256,13 @@ public sealed class MessageBroker : IAsyncDisposable
                         unhealthyConnections.Add(connectionId);
                     }
                 }
-                
+
                 foreach (var connectionId in unhealthyConnections)
                 {
-                    Console.WriteLine($"Disconnecting unhealthy client: {connectionId}");
+                    _logger.LogInformation("Disconnecting unhealthy client: {ConnectionId}", connectionId);
                     await _tcpServer.RemoveConnectionAsync(connectionId);
                 }
-                
+
                 await Task.Delay(_config.Server.HeartbeatInterval, _cancellationTokenSource.Token);
             }
             catch (OperationCanceledException)
@@ -262,7 +271,7 @@ public sealed class MessageBroker : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error in heartbeat monitor: {ex.Message}");
+                _logger.LogError(ex, "Error in heartbeat monitor");
             }
         }
     }
@@ -277,10 +286,10 @@ public sealed class MessageBroker : IAsyncDisposable
             try
             {
                 await Task.Delay(TimeSpan.FromMinutes(1), _cancellationTokenSource.Token);
-                
+
                 var stats = GetStatistics();
-                Console.WriteLine($"Broker Stats - Connections: {stats.ActiveConnections}, " +
-                                $"Topics: {stats.TopicCount}, Subscriptions: {stats.SubscriptionCount}");
+                _logger.LogInformation("Broker Stats - Connections: {ActiveConnections}, Topics: {TopicCount}, Subscriptions: {SubscriptionCount}",
+                    stats.ActiveConnections, stats.TopicCount, stats.SubscriptionCount);
             }
             catch (OperationCanceledException)
             {
@@ -288,7 +297,7 @@ public sealed class MessageBroker : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error in statistics reporter: {ex.Message}");
+                _logger.LogError(ex, "Error in statistics reporter");
             }
         }
     }
@@ -321,13 +330,13 @@ public sealed class MessageBroker : IAsyncDisposable
                     .Build();
 
                 await connection.SendMessageAsync(deliveryMessage, _cancellationTokenSource.Token);
-                
+
                 // Update subscriber activity
                 _subscriptionManager.UpdateSubscriberActivity(subscriberId);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error delivering message to subscriber {subscriberId}: {ex.Message}");
+                _logger.LogError(ex, "Error delivering message to subscriber {SubscriberId}", subscriberId);
             }
         }
     }
@@ -338,7 +347,7 @@ public sealed class MessageBroker : IAsyncDisposable
         _disposed = true;
 
         await StopAsync();
-        
+
         await _tcpServer.DisposeAsync();
         await _subscriptionManager.DisposeAsync();
         _storageManager.Dispose();
